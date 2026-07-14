@@ -21,12 +21,19 @@ from torchvision import datasets, transforms
 
 
 def _find_image_root(base_path: str) -> str:
-    """Walk downloaded path to find the directory containing identity folders (n*)."""
+    """Walk downloaded path to find the directory containing identity folders.
+
+    Picks whichever directory in the tree has the most immediate
+    subdirectories, rather than assuming a naming convention (e.g. classic
+    VGGFace2's "n000002" prefix) — repackaged Kaggle datasets often nest the
+    real identity folders under a wrapper directory and/or use different
+    naming, which silently defeated a name-prefix heuristic.
+    """
+    best_root, best_count = base_path, 0
     for root, dirs, _files in os.walk(base_path):
-        id_dirs = [d for d in dirs if d.startswith("n")]
-        if len(id_dirs) > 10:
-            return root
-    return base_path
+        if len(dirs) > best_count:
+            best_root, best_count = root, len(dirs)
+    return best_root
 
 
 class _RemapDataset(Dataset):
