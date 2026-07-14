@@ -1,252 +1,259 @@
 # Cancelable MinusFace
 
-Privacy-preserving, cancelable face recognition system extending the MinusFace paper with:
-1. **Haar Wavelet Encoder** — differentiable 2-level decomposition via `ptwt`
-2. **Cancelable Biometric Templates** — key-seeded Gaussian projection T(r, K)
+A privacy-preserving, cancelable face recognition system extending the **MinusFace**
+paper (subtractive biometrics) with two original contributions:
 
-## Quick Start (Google Colab T4)
+1. **Haar wavelet encoder** — a differentiable, invertible frequency-domain
+   transform (via `ptwt`) replacing the paper's DCT encoder.
+2. **Cancelable biometric templates** — a key-seeded Gaussian random projection
+   `T(r, K)` that makes the stored template revocable, unlinkable across
+   re-enrollments, and computationally infeasible to invert.
 
-Open `cancelable_minusface_colab.ipynb` (self-contained) or `notebooks/cancelable_minusface_v2.ipynb` (imports modules).
+No raw face image, and no raw residue, is ever stored or transmitted — only the
+512-dimensional projected template `T(r, K)` leaves the pipeline.
 
-**Manual steps:**
-1. Approve Google Drive mount popup
-2. Run `wandb.login()` once per session if not authenticated
+## Table of Contents
 
-The notebook runs top-to-bottom with no other manual steps.
+- [How It Works](#how-it-works)
+- [Repository Structure](#repository-structure)
+- [Getting Started](#getting-started)
+  - [Running on Google Colab](#running-on-google-colab-primary-workflow)
+  - [Pre-Training Sanity Check (local, no GPU)](#pre-training-sanity-check-local-no-gpu)
+- [Training Pipeline](#training-pipeline)
+- [Evaluation & Security Properties](#evaluation--security-properties)
+- [Key Design Decisions](#key-design-decisions)
+- [Known Limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [Changelog](#changelog)
+- [Acknowledgments](#acknowledgments)
 
-## Pipeline
+## How It Works
 
 ```
-Face X (112x112x3)
-  -> e(X) = x          WaveletMapper.encode()    (B, 21, 56, 56)
-  -> g(x) = x'         UNetGenerator             (B, 21, 56, 56)
-  -> r = x - x'        Residue: identity signal  (B, 65856)
-  -> T(r, K)           CancelableTransform       (B, 512) L2-normalized
-  -> f_p(T(r,K))       MLP classifier            class scores
+Face X (112×112×3)
+  → e(X) = x          WaveletMapper.encode()    (B, 21, 56, 56)
+  → g(x) = x'         UNetGenerator              (B, 21, 56, 56)
+  → r = x − x'        Residue: identity signal   (B, 65,856)
+  → T(r, K)           CancelableTransform        (B, 512), L2-normalized
+  → f_p(T(r, K))      MLP classifier             class scores
 ```
 
-## Training
+Instead of storing a face embedding directly, the system stores only what a
+generator *fails* to reconstruct — the residue `r`. The generator is trained to
+capture appearance (lighting, background, pose), so what's left behind in `r` is
+identity-discriminative structure. That residue is then passed through a
+key-seeded random projection before it ever leaves the pipeline, giving three
+properties for free:
+
+- **Cancelability** — delete key `K` and the template `T(r, K)` is permanently
+  unusable.
+- **Unlinkability** — re-enroll with a new key `K'`; `T(r, K)` and `T(r, K')` are
+  statistically independent, indistinguishable from an impostor pair.
+- **Non-invertibility** — the 65,856 → 512 projection has a 65,344-dimensional
+  null space, defeating pseudo-inverse reconstruction attacks even with the key.
+
+## Repository Structure
+
+```
+Capstone/
+├── cancelable_minusface_colab.ipynb   # Main, self-contained Colab notebook
+├── notebooks/
+│   └── cancelable_minusface_v2.ipynb  # Modular notebook (imports from packages below)
+├── models/
+│   ├── wavelet_mapper.py              # WaveletMapper: Haar encode/decode
+│   ├── unet_generator.py              # UNetGenerator + ConvBlock
+│   └── cancelable_transform.py        # CancelableTransform: T(r, K)
+├── training/
+│   ├── stage1_train.py                # run_stage1(): joint generator + recognizer
+│   └── stage2_train.py                # run_stage2(), build_mlp(): MLP on templates
+├── data/
+│   └── dataloader.py                  # download_vggface2(), build_dataloaders()
+├── eval/
+│   ├── cancelability.py               # run_cancelability(): ROC + AUC
+│   ├── non_invertibility.py           # run_non_invertibility(): pseudo-inverse attack
+│   ├── cancellation_demo.py           # run_cancellation_demo(): full lifecycle demo
+│   ├── lfw_verification.py            # LFW 6,000-pair verification benchmark
+│   ├── agedb_verification.py          # AgeDB-30 verification benchmark
+│   └── sanity_transform_test.py       # Pre-training sanity check (no GPU required)
+├── utils/
+│   ├── checkpoint.py                  # Checkpoint save/load/resume helpers
+│   └── visualise.py                   # Plotting for every experiment
+├── README.md
+└── CHANGELOG.md                       # Full bug-fix and upgrade history
+```
+
+## Getting Started
+
+### Prerequisites
+
+| Requirement | Needed for |
+|---|---|
+| Google account | Colab runtime + Google Drive checkpoint persistence |
+| Kaggle account + API key | Downloading VGGFace2 (and optionally AgeDB) via `kagglehub` |
+| Weights & Biases account (optional) | Experiment tracking — set `mode='disabled'` in Block 7 to skip |
+| A GitHub fork of this repo (optional) | Only if you want the notebook to clone *your* copy — otherwise point `REPO_URL` at this repo directly |
+
+### Running on Google Colab (primary workflow)
+
+The project is designed to run top-to-bottom in `cancelable_minusface_colab.ipynb`
+on a single T4 GPU, in roughly 3 hours end-to-end.
+
+1. **Open the notebook.** Upload `cancelable_minusface_colab.ipynb` to Colab, or
+   open it directly from GitHub via *File → Open notebook → GitHub*.
+2. **Select a GPU runtime.** *Runtime → Change runtime type → T4 GPU.*
+3. **Set your repo URL** (Block 1). If you're working from your own fork, update
+   `REPO_URL`; the notebook clones it and adds it to `sys.path` so the `models/`,
+   `training/`, `data/`, `eval/`, and `utils/` packages import cleanly.
+4. **Install dependencies** (Block 2) — runs automatically:
+   `pip install ptwt wandb kagglehub tqdm --quiet`. Everything else (`torch`,
+   `torchvision`, `scikit-learn`, `matplotlib`) is preinstalled on Colab.
+5. **Authenticate W&B** (Block 4) — run `wandb.login()` once per session, or set
+   the `WANDB_API_KEY` environment variable beforehand. To skip tracking
+   entirely, change `mode='online'` to `mode='disabled'` in Block 7.
+6. **Mount Google Drive** (Block 5) — approve the popup. Checkpoints are written
+   to `/content/drive/MyDrive/minusface_checkpoints/` after every epoch, so
+   training survives a disconnected Colab session.
+7. **Set Kaggle credentials** before Block 8 — either export
+   `KAGGLE_USERNAME` / `KAGGLE_KEY` as environment variables, or place your
+   `kaggle.json` at `~/.kaggle/kaggle.json`. This is required to download the
+   VGGFace2 112×112 dataset (8,631 identities, ~863K images after the
+   stratified cap).
+8. **Run all cells in order** (*Runtime → Run all*, or step through manually).
+   Everything downstream — model init, Stage 1 training, the convergence guard,
+   Stage 2 training, and all five evaluation experiments — runs without further
+   input.
+9. **Watch the convergence guard** (Block 14). Stage 2 is blocked with an
+   assertion unless `gen_loss < 0.05`. If it fires, increase `S1_EPOCHS`
+   (config in Block 6, e.g. 15 → 20–25) and re-run Block 12 — training
+   auto-resumes from the last Drive checkpoint rather than starting over.
+10. **Read the results** (Block 23) — a final summary table with every metric
+    (accuracies, same-key/cross-key AUC, recovery similarity, LFW/AgeDB AUC)
+    checked against its target, plus six saved plots
+    (`pipeline.png`, `stage1.png`, `stage2.png`, `cancelability.png`,
+    `noninvert.png`, `cancellation_demo.png`) and everything logged to your W&B
+    run.
+
+The LFW (Block 21) and AgeDB-30 (Block 22) benchmarks each download their own
+dataset and are wrapped in `try/except` — they skip gracefully (rather than
+crashing the run) if the download fails or credentials are missing.
+
+### Pre-Training Sanity Check (local, no GPU)
+
+Before spending GPU hours on a full Stage 1 + Stage 2 run, you can verify that
+`CancelableTransform` itself is mathematically sound — independent of whether the
+generator has converged — using synthetic residues on CPU:
+
+```bash
+pip install torch scikit-learn numpy
+python -m eval.sanity_transform_test
+```
+
+This compares a pure-noise residue regime (what a converged generator should
+produce) against a shared-bias regime (what an under-converged generator leaks)
+and prints a pass/fail summary, exiting `0` on pass and `1` on fail. See
+[`eval/sanity_transform_test.py`](eval/sanity_transform_test.py) for the full
+rationale, and [CHANGELOG.md](CHANGELOG.md#bug-6--non-invertibility-test-compared-re-projected-templates-not-raw-residues)
+for the bug it was built to catch.
+
+## Training Pipeline
 
 | Stage | What trains | Loss | Epochs |
 |-------|------------|------|--------|
-| 1 | Generator + ResNet-18 residue recognizer jointly | 5·L1(x',x) + CE(f_r(r), y) | 15 |
-| 2 | MLP f_p on frozen cancelable templates | CE(f_p(T(r,K)), y) | 8 |
+| 1 | Generator + ResNet-18 residue recognizer, jointly, with opposing objectives | `5·L1(x', x) + 1·CE(f_r(r), y)` | 15 |
+| 2 | MLP `f_p` on frozen cancelable templates | `CE(f_p(T(r,K)), y)` | 8 |
 
-**Estimated training time on T4 with all upgrades** (AMP + torch.compile + stratified subset):
+**Estimated training time on a T4** (mixed precision + `torch.compile` +
+stratified dataset subset):
 
 | Configuration | Stage 1 | Stage 2 | Total |
 |--------------|---------|---------|-------|
-| Full 3.31M samples (original) | ~9 hrs | ~2.5 hrs | ~11.5 hrs |
-| Stratified 100/identity (~863K) | ~2.4 hrs | ~0.7 hrs | ~3.1 hrs |
+| Full 3.31M samples | ~9 hrs | ~2.5 hrs | ~11.5 hrs |
+| Stratified 100 images/identity (~863K) | ~2.4 hrs | ~0.7 hrs | ~3.1 hrs |
 
-The stratified cap reduces wall-clock time ~4× with no reduction in identity diversity.
+The stratified cap keeps all 8,631 identities while cutting wall-clock time ~4×.
 
-## Key Design Decisions
-
-- **Projection on CPU**: P_K is 65856×512 = 128 MB. Placing it on GPU causes OOM on T4. Only the (B, 512) result moves to GPU.
-- **Single forward pass**: `x_prime = generator(x)` is computed once per batch and reused for both the residue and the generator loss.
-- **VGGFace2 over LFW**: 8631 identities vs ~1140, enabling meaningful identity discrimination.
-- **Convergence guard**: Stage 2 is blocked by `assert gen_loss[-1] < 0.05` — if the generator has not converged, the residue still contains visible face structure and non-invertibility will fail.
-
-## Security & Threat Model
+## Evaluation & Security Properties
 
 ### Threat Model
 
-- **Server is honest-but-curious**: stores templates and may attempt passive inference, but does not actively collude with attackers
-- **Raw face images are never stored or transmitted**: only T(r, K) reaches the server
-- **Client-side key generation and template computation**: the projection happens before any data leaves the device
-- **Key compromise scenario**: attacker has T(r, K) and K → pseudo-inverse attack fails (recovery_sim < 0.30) due to 65,344-dim null space of the projection
-- **Template compromise without key**: useless — no key means no projection matrix means no comparison possible
+- **Server is honest-but-curious**: stores templates and may attempt passive
+  inference, but does not actively collude with attackers.
+- **Raw face images are never stored or transmitted** — only `T(r, K)` reaches
+  the server.
+- **Client-side key generation and template computation** — the projection
+  happens before any data leaves the device.
+- **Key compromise**: attacker has `T(r, K)` *and* `K` → pseudo-inverse attack
+  fails (`recovery_sim < 0.30`) due to the 65,344-dimensional null space.
+- **Template compromise without the key** — useless; no key means no
+  projection matrix means no comparison possible.
 
 ### Security Properties (empirical, not cryptographic)
 
-| Property | Mechanism | Verified by |
-|----------|-----------|-------------|
-| Non-invertibility | 65856→512 projection null space | Experiment 2 |
-| Unlinkability | Different keys → independent T(r,K) | Experiment 1 cross-key AUC ≈ 0.5 |
-| Cancelability | Delete key → template inaccessible | Experiment 3 |
-| No raw storage | Only T(r,K) stored, never X or r | Architecture design |
+| Property | Mechanism | Pass criterion | Verified by |
+|----------|-----------|-----------------|-------------|
+| Cancelability | Delete key `K`; issue `K'` | cross-key AUC ≈ 0.5 | Cancellation demo |
+| Unlinkability | Different keys → independent `T(r,K)` | \|cross-key mean − impostor mean\| < 0.05 | Cancelability experiment |
+| Non-invertibility | 65,856 → 512 projection, 65,344-dim null space | `recovery_sim` < 0.30 | Non-invertibility experiment |
 
-## Security Properties
-
-| Property | How | Pass criterion |
-|----------|-----|----------------|
-| Cancelability | Delete key K; issue K' | cross-key AUC ≈ 0.5 |
-| Unlinkability | T(r,K) · T(r,K') ≈ 0 | \|cross-key mean − impostor mean\| < 0.05 |
-| Non-invertibility | 65856→512 projection, 65344-dim null space | recovery_sim < 0.3 |
-
-## Evaluation Benchmarks
+### Evaluation Benchmarks
 
 | Benchmark | Protocol | Metrics reported |
 |-----------|----------|-----------------|
 | LFW | Standard 6,000-pair protocol (3,000 genuine + 3,000 impostor) from `pairs.txt` | AUC, TAR@FAR=0.1%, TAR@FAR=1% |
 | AgeDB-30 | Balanced pairs with age gap ≤ 30 yr, filename-parsed identity | AUC, TAR@FAR=1% |
-| Internal — Cancelability | 500 same-key and cross-key pairs from val set | Cross-key AUC ≈ 0.5 (unlinkability) |
-| Internal — Non-invertibility | Pseudo-inverse attack on val batch | Recovery sim < 0.30 |
-| Pre-training sanity check | Synthetic residues (no generator/GPU/dataset needed) — `python -m eval.sanity_transform_test` | Confirms `CancelableTransform` math is sound *before* spending GPU hours; separates transform bugs from generator non-convergence |
+| Internal — Cancelability | 500 same-key and cross-key pairs from the validation set | Cross-key AUC ≈ 0.5 (unlinkability) |
+| Internal — Non-invertibility | Pseudo-inverse attack on a validation batch | Recovery similarity < 0.30 |
+| Pre-training sanity check | Synthetic residues, no generator/GPU/dataset needed — `python -m eval.sanity_transform_test` | Confirms `CancelableTransform` math is sound *before* spending GPU hours |
 
-Implementations: `eval/lfw_verification.py`, `eval/agedb_verification.py`
+## Key Design Decisions
 
-LFW and AgeDB eval require trained models from Stages 1 and 2. Both blocks are wrapped in `try/except` in the notebook and skip gracefully if download fails.
-
-## File Tree
-
-```
-Capstone/
-├── cancelable_minusface_colab.ipynb   # Main self-contained Colab notebook (Phase 0+1)
-├── notebooks/
-│   └── cancelable_minusface_v2.ipynb  # Modular notebook (imports from packages)
-├── models/
-│   ├── __init__.py
-│   ├── wavelet_mapper.py              # WaveletMapper: Haar encode/decode
-│   ├── unet_generator.py             # UNetGenerator + ConvBlock
-│   └── cancelable_transform.py       # CancelableTransform: T(r,K)
-├── training/
-│   ├── __init__.py
-│   ├── stage1_train.py               # run_stage1(): joint gen + recognizer
-│   └── stage2_train.py               # run_stage2(), build_mlp(): MLP on templates
-├── data/
-│   ├── __init__.py
-│   └── dataloader.py                 # download_vggface2(), build_dataloaders()
-├── eval/
-│   ├── __init__.py
-│   ├── cancelability.py              # run_cancelability() with ROC + AUC
-│   ├── non_invertibility.py          # run_non_invertibility() pseudo-inverse attack
-│   ├── cancellation_demo.py          # run_cancellation_demo() lifecycle
-│   └── sanity_transform_test.py      # pre-training sanity check (see below)
-├── utils/
-│   ├── __init__.py
-│   ├── checkpoint.py                 # make_checkpoint_fn(), load/restore helpers
-│   └── visualise.py                  # plot_pipeline/stage1/stage2/cancelability/...
-└── README.md
-```
-
-## Bugs Fixed (Phase 0)
-
-### Bug 1 — Double generator forward pass
-```python
-# BEFORE (wrong) — two separate forward passes, inconsistent gradients
-r  = x - generator(x)
-lg = crit_gen(generator(x), x)   # second call
-
-# AFTER (correct) — one pass, reused
-x_prime = generator(x)
-r        = x - x_prime
-lg       = crit_gen(x_prime, x)
-```
-
-### Bug 2 — Double mapper.encode() in validation loop
-```python
-# BEFORE (wrong) — two encode calls, wasteful and inconsistent
-r = mapper.encode(imgs) - generator(mapper.encode(imgs))
-
-# AFTER (correct) — one encode
-x       = mapper.encode(imgs)
-x_prime = generator(x)
-r       = x - x_prime
-```
-
-### Bug 3 — Dataset too small (LFW → VGGFace2)
-```python
-# BEFORE
-path = kagglehub.dataset_download("jessicali9530/lfw-dataset")
-# 423 identities after filtering, insufficient for meaningful training
-
-# AFTER
-path = kagglehub.dataset_download("yakhyokhuja/vggface2-112x112")
-# 8631 identities, 3.31M images, avg ~380 per identity
-```
-
-### Bug 4 — lstsq pseudo-inverse (non-invertibility test)
-```python
-# BEFORE (wrong) — ambiguous for underdetermined systems
-Pp = torch.linalg.lstsq(P.T, torch.eye(512)).solution
-
-# AFTER (correct) — guaranteed shape (512, 65856)
-Pp = torch.linalg.pinv(P)
-```
-
-### Bug 5 — Hardcoded batch size in non-invertibility test
-```python
-# BEFORE (crashes if batch < 50)
-test_imgs = next(iter(val_loader))[0][:50]
-r_est = r_est_flat.reshape(50, 21, 56, 56)
-
-# AFTER (uses actual batch count)
-test_imgs = next(iter(val_loader))[0]
-N_ACTUAL  = test_imgs.shape[0]
-r_est     = r_est_flat.reshape(N_ACTUAL, 21, 56, 56)
-```
-
-### Bug 6 — Non-invertibility test compared re-projected templates, not raw residues (FIXED)
-
-The pseudo-inverse attack recovery-similarity metric (`eval/non_invertibility.py`)
-compared `ct.transform(r_true)` to `ct.transform(r_est)` instead of comparing
-`r_true` to `r_est` directly. By the Moore-Penrose identity `P·P⁺·P = P`, the
-adversary's recovery `r_est = tmpl @ P⁺` satisfies `r_est @ P == r_true @ P`
-**exactly**, for any `r_true` — so re-projecting both through `ct.transform`
-and comparing was tautologically 1.0, always, regardless of model quality or
-generator convergence. This alone explains the old `recovery_sim = 1.0000`
-"COMPLETE FAIL" result; it had nothing to do with the generator.
-
-```python
-# BEFORE (wrong) — always returns ~1.0 by construction, tests nothing
-tmpl_rec = ct.transform(r_est.to(device), key=key).cpu()
-rec_sim = (tmpl_cpu * tmpl_rec).sum(dim=1).numpy()
-
-# AFTER (correct) — compares raw residues directly, in the original space
-r_true_n = F.normalize(r_t.cpu().float().reshape(n_actual, -1), p=2, dim=1)
-r_est_n  = F.normalize(r_est_flat, p=2, dim=1)
-rec_sim  = (r_true_n * r_est_n).sum(dim=1).numpy()
-```
-
-Verified fixed via `eval/sanity_transform_test.py` (new — see below): with
-synthetic pure-noise residues standing in for a converged generator's output,
-`recovery_sim` now reports ~0.09 (correctly low, not a tautological 1.0).
-`eval/cancelability.py` was audited for the same pattern and does **not**
-have this bug — it compares templates directly (no reconstruction step), which
-is the correct convention for measuring unlinkability.
-
-## What Was Added in Phase 1
-
-- **W&B integration**: `wandb.init` with full config dict; `wandb.log` per epoch for all metrics; pipeline.png and cancelability.png logged as `wandb.Image`
-- **Google Drive checkpointing**: saves after every epoch; auto-resume detects latest checkpoint on session restart
-- **Convergence guard**: `assert s1_gloss[-1] < 0.05` with a clear warning message blocks Stage 2 if generator has not converged
-- **ROC curves with AUC**: same-key AUC (usability) and cross-key AUC (unlinkability ≈ 0.5) in the cancelability experiment
-- **All 6 output plots**: pipeline.png, stage1.png, stage2.png, cancelability.png, noninvert.png, cancellation_demo.png
-- **Final summary cell**: prints all metrics in a clean table and pushes to `run.summary`
-- **Batch size / workers**: bumped from 32/2 to 64/4
-
-## Performance Upgrades (Phase 2 Round 2)
-
-1. **Stratified dataset subset** (`imgs_per_identity=100`): caps each identity at 100 samples, retaining all 8631 identities while reducing 3.31M → ~863K total samples. ~4× faster per epoch.
-2. **Mixed precision training** (`torch.cuda.amp`): `autocast()` + `GradScaler` for both stages. ~1.5–2× speedup on T4 Tensor Cores. Scaler state saved in checkpoints so resume does not cause loss spikes.
-3. **torch.compile** (`mode='reduce-overhead'`): applied to generator, recognizer, and fp with try/except fallback for PyTorch < 2.0. Additional ~10–20% throughput after first-epoch JIT warmup.
-4. **Persistent workers + prefetch** (`persistent_workers=True`, `prefetch_factor=2`): eliminates DataLoader worker spawn overhead between batches.
-5. **tqdm progress bars**: inner per-batch bar with live loss display; outer per-epoch bar with ETA. Uses `tqdm.auto` for Colab and terminal compatibility.
-6. **Training time estimate cell**: two warmup passes (second used, first discarded due to JIT tracing overhead) extrapolated to full epoch counts for Stage 1 and Stage 2.
-7. **Epoch timing in logs**: wall-clock elapsed per epoch + remaining-time estimate printed after each epoch; `epoch_time_sec` logged to W&B.
-
-## Dependencies
-
-```bash
-pip install ptwt wandb
-# All other packages (torch, torchvision, sklearn, matplotlib, tqdm) pre-installed on Colab
-```
+- **Projection on CPU**: `P_K` is 65,856×512 = 128 MB. Placing it on GPU causes
+  an OOM on a T4. Only the `(B, 512)` result moves to GPU.
+- **Single generator forward pass**: `x_prime = generator(x)` is computed once
+  per batch and reused for both the residue and the generator loss.
+- **VGGFace2 over LFW**: 8,631 identities vs. ~1,140, enabling meaningful
+  identity discrimination at Stage 1 and Stage 2.
+- **Convergence guard**: Stage 2 is blocked by `assert gen_loss[-1] < 0.05` — if
+  the generator hasn't converged, the residue still contains visible face
+  structure and non-invertibility will fail for real, model-quality reasons.
 
 ## Known Limitations
 
-- **GPU training required**: The full VGGFace2 dataset requires a GPU. CPU-only training will take many hours.
-- **Wandb API key**: You must run `wandb.login()` once per session. Set `mode='disabled'` to skip logging.
-- **Kaggle credentials**: `kagglehub` needs your Kaggle API key in `~/.kaggle/kaggle.json` or as environment variables.
-- **15 epochs may not converge**: If `gen_loss[-1] >= 0.05` after Stage 1, increase `S1_EPOCHS` to 20-25 and re-run. The auto-resume logic will pick up where training left off.
-- **Cancellation demo threshold**: The demo uses a cosine threshold of 0.2. Real systems would calibrate this threshold at a target FAR.
+- **GPU training required** — the full VGGFace2 dataset needs a GPU; CPU-only
+  training would take many hours per epoch.
+- **W&B API key** — `wandb.login()` is required once per session unless you set
+  `mode='disabled'`.
+- **Kaggle credentials** — `kagglehub` needs your API key in
+  `~/.kaggle/kaggle.json` or as environment variables.
+- **15 epochs may not converge** — if `gen_loss[-1] >= 0.05` after Stage 1,
+  increase `S1_EPOCHS` to 20–25 and re-run; auto-resume picks up where training
+  left off.
+- **Cancellation demo threshold** — uses a fixed cosine threshold of 0.2; a real
+  system would calibrate this at a target FAR.
 
-## Suggested Next Steps
+## Roadmap
 
-1. **Verify gen_loss < 0.05**: After Stage 1, check that the decoded residue looks like noise (not faces). If faces are still visible, run more epochs.
-2. **TAR@FAR evaluation**: Replace top-1 accuracy with a proper biometric metric (True Accept Rate at 0.1% False Accept Rate).
-3. **Multi-key Stage 2**: Assign each identity a different key during Stage 2 training and verify that recognition accuracy is maintained.
-4. **Larger generator**: Try a deeper U-Net (512→1024 bottleneck) or replace with a pretrained backbone for faster convergence.
-5. **Threshold calibration**: Tune the authentication threshold per-FAR operating point using the ROC curves from the cancelability experiment.
-6. **Paper writeup**: Sections to highlight: (1) novel wavelet encoder vs DCT, (2) cancelability property proof via Gaussian projection, (3) non-invertibility bound from null-space argument.
+1. **Verify `gen_loss < 0.05`** after Stage 1, and visually confirm the decoded
+   residue looks like noise, not a face.
+2. **TAR@FAR evaluation** — replace top-1 accuracy with a proper biometric
+   metric (True Accept Rate at a fixed False Accept Rate).
+3. **Multi-key Stage 2** — assign each identity a distinct key during Stage 2
+   training and confirm recognition accuracy is maintained.
+4. **Larger generator** — a deeper U-Net (512→1024 bottleneck) or a pretrained
+   backbone, for faster convergence.
+5. **Threshold calibration** — tune the authentication threshold per-FAR
+   operating point using the cancelability experiment's ROC curves.
+6. **Paper writeup** — novel wavelet encoder vs. DCT; cancelability proof via
+   Gaussian projection; non-invertibility bound from the null-space argument.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full history of bugs found and fixed,
+and capability added, phase by phase.
+
+## Acknowledgments
+
+Core idea (encode → regenerate → subtract → residue) comes from **MinusFace:
+Privacy-Preserving Face Recognition via Subtractive Biometrics**. This project's
+contributions on top of that paper are the Haar wavelet encoder (replacing DCT)
+and the cancelable Gaussian projection transform `T(r, K)`.
