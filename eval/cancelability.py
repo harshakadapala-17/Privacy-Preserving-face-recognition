@@ -8,6 +8,16 @@ Compares three cosine similarity distributions to verify key-based unlinkability
 
 Pass criterion: |cross_key_mean - impostor_mean| < 0.05
 ROC curves: same-key AUC should be high; cross-key AUC should be ~0.5.
+
+Methodology note: all three distributions here compare templates directly
+(T(r,K_a) vs T(r,K_b), or T(r_i,K_a) vs T(r_j,K_a)) — there is no
+reconstruction/recovery step. This is the correct convention for
+unlinkability (the question is "do templates from different keys look
+alike"), and it does NOT suffer from the tautology found in
+eval/non_invertibility.py, where comparing an adversary's *reconstruction*
+via re-projected templates (rather than raw residues) made the metric
+trivially 1.0 by the Moore-Penrose identity. There is no reconstruction
+step here, so no analogous bug applies.
 """
 
 from __future__ import annotations

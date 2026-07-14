@@ -57,9 +57,17 @@ def run_non_invertibility(
     r_est_flat = tmpl_cpu @ Pp                            # (N, 65856) — CPU
     r_est = r_est_flat.reshape(n_actual, 21, 56, 56)      # (N, 21, 56, 56)
 
-    # Measure recovery quality by comparing templates of true vs recovered r
-    tmpl_rec = ct.transform(r_est.to(device), key=key).cpu()
-    rec_sim = (tmpl_cpu * tmpl_rec).sum(dim=1).numpy()
+    # Measure recovery quality by comparing r_true and r_est directly in
+    # residue space. NOTE: comparing ct.transform(r_true) to ct.transform(r_est)
+    # is WRONG — r_est = Proj_P(r_true) (the orthogonal projection of r_true
+    # onto P's 512-dim column space), and by the Moore-Penrose identity
+    # P^T @ Proj_P = P^T, so ct.transform(r_est) == ct.transform(r_true)
+    # EXACTLY for any r_true. That comparison is tautologically 1.0 and
+    # measures nothing about the adversary's actual reconstruction quality.
+    r_true_flat = r_t.cpu().float().reshape(n_actual, -1)
+    r_true_n = torch.nn.functional.normalize(r_true_flat, p=2, dim=1)
+    r_est_n = torch.nn.functional.normalize(r_est_flat, p=2, dim=1)
+    rec_sim = (r_true_n * r_est_n).sum(dim=1).numpy()
 
     mean_sim = float(rec_sim.mean())
     pass_test = mean_sim < 0.3
@@ -67,7 +75,6 @@ def run_non_invertibility(
     print("Non-Invertibility: pseudo-inverse attack")
     print("=" * 50)
     print(f"Samples evaluated         : {n_actual}")
-    print(f"Genuine match similarity  : 1.0000  (by definition)")
     print(f"Adversary recovery sim    : {mean_sim:.4f} +/- {rec_sim.std():.4f}")
     print()
     print("NON-INVERTIBILITY:", "PASS" if pass_test else "REVIEW (generator may not have converged)")

@@ -83,6 +83,7 @@ The stratified cap reduces wall-clock time ~4× with no reduction in identity di
 | AgeDB-30 | Balanced pairs with age gap ≤ 30 yr, filename-parsed identity | AUC, TAR@FAR=1% |
 | Internal — Cancelability | 500 same-key and cross-key pairs from val set | Cross-key AUC ≈ 0.5 (unlinkability) |
 | Internal — Non-invertibility | Pseudo-inverse attack on val batch | Recovery sim < 0.30 |
+| Pre-training sanity check | Synthetic residues (no generator/GPU/dataset needed) — `python -m eval.sanity_transform_test` | Confirms `CancelableTransform` math is sound *before* spending GPU hours; separates transform bugs from generator non-convergence |
 
 Implementations: `eval/lfw_verification.py`, `eval/agedb_verification.py`
 
@@ -111,7 +112,8 @@ Capstone/
 │   ├── __init__.py
 │   ├── cancelability.py              # run_cancelability() with ROC + AUC
 │   ├── non_invertibility.py          # run_non_invertibility() pseudo-inverse attack
-│   └── cancellation_demo.py          # run_cancellation_demo() lifecycle
+│   ├── cancellation_demo.py          # run_cancellation_demo() lifecycle
+│   └── sanity_transform_test.py      # pre-training sanity check (see below)
 ├── utils/
 │   ├── __init__.py
 │   ├── checkpoint.py                 # make_checkpoint_fn(), load/restore helpers
@@ -175,6 +177,35 @@ test_imgs = next(iter(val_loader))[0]
 N_ACTUAL  = test_imgs.shape[0]
 r_est     = r_est_flat.reshape(N_ACTUAL, 21, 56, 56)
 ```
+
+### Bug 6 — Non-invertibility test compared re-projected templates, not raw residues (FIXED)
+
+The pseudo-inverse attack recovery-similarity metric (`eval/non_invertibility.py`)
+compared `ct.transform(r_true)` to `ct.transform(r_est)` instead of comparing
+`r_true` to `r_est` directly. By the Moore-Penrose identity `P·P⁺·P = P`, the
+adversary's recovery `r_est = tmpl @ P⁺` satisfies `r_est @ P == r_true @ P`
+**exactly**, for any `r_true` — so re-projecting both through `ct.transform`
+and comparing was tautologically 1.0, always, regardless of model quality or
+generator convergence. This alone explains the old `recovery_sim = 1.0000`
+"COMPLETE FAIL" result; it had nothing to do with the generator.
+
+```python
+# BEFORE (wrong) — always returns ~1.0 by construction, tests nothing
+tmpl_rec = ct.transform(r_est.to(device), key=key).cpu()
+rec_sim = (tmpl_cpu * tmpl_rec).sum(dim=1).numpy()
+
+# AFTER (correct) — compares raw residues directly, in the original space
+r_true_n = F.normalize(r_t.cpu().float().reshape(n_actual, -1), p=2, dim=1)
+r_est_n  = F.normalize(r_est_flat, p=2, dim=1)
+rec_sim  = (r_true_n * r_est_n).sum(dim=1).numpy()
+```
+
+Verified fixed via `eval/sanity_transform_test.py` (new — see below): with
+synthetic pure-noise residues standing in for a converged generator's output,
+`recovery_sim` now reports ~0.09 (correctly low, not a tautological 1.0).
+`eval/cancelability.py` was audited for the same pattern and does **not**
+have this bug — it compares templates directly (no reconstruction step), which
+is the correct convention for measuring unlinkability.
 
 ## What Was Added in Phase 1
 

@@ -126,13 +126,76 @@ LFW only has ~1140 identities with ≥5 images — too few classes, too few samp
 VGGFace2 has 8631 identities, 3.31M images, avg ~380 per identity.
 No `transforms.Resize` needed — already 112×112.
 
+### Bug 6 — Non-invertibility test compared re-projected templates, not raw residues (FIXED)
+Found during a code audit requested *before* the VGGFace2 retrain, specifically to rule out
+a transform bug as the cause of `recovery_sim = 1.0000` on the old LFW run.
+
+`eval/non_invertibility.py` measured recovery quality by comparing
+`ct.transform(r_true)` to `ct.transform(r_est)` (re-encoding the adversary's
+reconstruction through the *same* projection) instead of comparing `r_true`
+to `r_est` directly. This is not a statistical bias — it's a deterministic
+identity. By the Moore-Penrose property `P·P⁺·P = P`, the adversary's
+recovery `r_est = tmpl @ P⁺` satisfies `r_est @ P == r_true @ P` **exactly**,
+for *any* `r_true`. So `ct.transform(r_est)` and `ct.transform(r_true)` were
+numerically identical — cosine similarity 1.0000, always, independent of
+whether the generator converged. This bug alone fully explains the old
+`recovery_sim = 1.0000` result; it was never a generator problem.
+
+```python
+# OLD (wrong) — always ~1.0 by construction, tests nothing
+tmpl_rec = ct.transform(r_est.to(device), key=key).cpu()
+rec_sim  = (tmpl_cpu * tmpl_rec).sum(dim=1).numpy()
+
+# NEW (correct) — compare raw residues directly in the original 65856-dim space
+r_true_n = F.normalize(r_t.cpu().float().reshape(n_actual, -1), p=2, dim=1)
+r_est_n  = F.normalize(r_est_flat, p=2, dim=1)
+rec_sim  = (r_true_n * r_est_n).sum(dim=1).numpy()
+```
+
+`eval/cancelability.py` was audited for the same pattern and does **not**
+have it — it compares templates directly with no reconstruction step, which
+is the correct convention for measuring unlinkability (a different question
+than "can the residue be recovered").
+
+New file `eval/sanity_transform_test.py` — a synthetic, GPU-free test that
+verifies `CancelableTransform` correctness independent of generator
+convergence. Two regimes: `noise` (iid per-sample residue, stand-in for a
+converged generator) and `biased` (shared bias term across all residues,
+stand-in for an under-converged generator). Confirmed:
+- `noise` regime: cross-key AUC ≈ 0.4936 (target ~0.5 ✓), `recovery_sim` ≈
+  0.0880 (target < 0.30 ✓) — the transform is mathematically sound.
+- `biased` regime: cross-key AUC collapses to 0.0000 (far from 0.5), which
+  reproduces the *direction* of the real LFW failure (0.2178) — confirming
+  that a bad cross-key AUC on the real run is a generator-convergence
+  symptom, not a transform bug. Mechanism: same-key impostor pairs both
+  carry the shared bias through the same projection matrix (inflating their
+  similarity), while genuine cross-key pairs use two independent projection
+  matrices on the *same* sample, which decorrelates regardless of the bias.
+
+Run before every training run: `python -m eval.sanity_transform_test`
+(exits 0 on pass, 1 on fail — safe to gate GPU spend on it).
+
 ---
 
 ## 6. Known Current Issue
 
-**Faces visible in residue → NON-INVERTIBILITY: REVIEW**
+**~~Faces visible in residue → NON-INVERTIBILITY: REVIEW~~ — partially resolved (measurement bug fixed; real result still pending)**
 
-The residue `r` decoded back to spatial domain should look like noise (no recognisable faces). If faces are visible, the generator has not converged — it's outputting near-zero so `r ≈ x - 0 = x`.
+The old LFW run reported `recovery_sim = 1.0000` ("COMPLETE FAIL"). A code
+audit found this was **not** a generator/convergence problem — it was
+[Bug 6](#bug-6) in `eval/non_invertibility.py`: the metric compared
+re-projected templates instead of raw residues, which is tautologically 1.0
+by construction regardless of model quality. That bug is now fixed, and
+`eval/sanity_transform_test.py` confirms the corrected metric behaves
+correctly on synthetic data (reports ~0.09, not 1.0, when residues are
+noise-like).
+
+What remains genuinely open — and unaffected by the Bug 6 fix — is whether
+the **generator has converged**. The residue `r` decoded back to spatial
+domain should look like noise (no recognisable faces). If faces are still
+visible, the generator has not converged — it's outputting near-zero so
+`r ≈ x - 0 = x`. That question can only be answered by re-running Stage 1
+training; it is not something the eval-code fix resolves.
 
 Root causes in order of likelihood:
 1. Stage 1 gen loss not below 0.05 yet — needs more epochs
@@ -140,6 +203,10 @@ Root causes in order of likelihood:
 3. LFW (old dataset) too small — VGGFace2 (new) should help significantly
 
 Check: after Stage 1, print `s1_gloss[-1]`. If > 0.05, run more epochs before Stage 2.
+
+**Status:** measurement bug resolved (Bug 6); actual `recovery_sim` and
+cross-key AUC on real data are pending the VGGFace2 retrain — do not treat
+the old LFW numbers as current.
 
 ---
 
