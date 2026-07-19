@@ -74,7 +74,8 @@ Capstone/
 │   ├── cancellation_demo.py           # run_cancellation_demo(): full lifecycle demo
 │   ├── lfw_verification.py            # LFW 6,000-pair verification benchmark
 │   ├── agedb_verification.py          # AgeDB-30 verification benchmark
-│   └── sanity_transform_test.py       # Pre-training sanity check (no GPU required)
+│   ├── sanity_transform_test.py       # Pre-training sanity check: CancelableTransform (no GPU)
+│   └── sanity_stage2_test.py          # Pre-training sanity check: Stage 2 training loop (no GPU)
 ├── utils/
 │   ├── checkpoint.py                  # Checkpoint save/load/resume helpers
 │   └── visualise.py                   # Plotting for every experiment
@@ -146,14 +147,17 @@ generator has converged — using synthetic residues on CPU:
 ```bash
 pip install torch scikit-learn numpy
 python -m eval.sanity_transform_test
+python -m eval.sanity_stage2_test
 ```
 
-This compares a pure-noise residue regime (what a converged generator should
-produce) against a shared-bias regime (what an under-converged generator leaks)
-and prints a pass/fail summary, exiting `0` on pass and `1` on fail. See
-[`eval/sanity_transform_test.py`](eval/sanity_transform_test.py) for the full
-rationale, and [CHANGELOG.md](CHANGELOG.md#bug-6--non-invertibility-test-compared-re-projected-templates-not-raw-residues)
-for the bug it was built to catch.
+`sanity_transform_test.py` compares a pure-noise residue regime (what a
+converged generator should produce) against a shared-bias regime (what an
+under-converged generator leaks). `sanity_stage2_test.py` checks the Stage 2
+training loop itself — that loss actually falls and accuracy rises gradually
+on genuine multi-class data, and that a degenerate single-class dataset is
+rejected outright rather than silently producing a "perfect" but meaningless
+checkpoint. Both print a pass/fail summary and exit `0` on pass, `1` on fail.
+See [CHANGELOG.md](CHANGELOG.md) for the bugs each one was built to catch.
 
 ## Training Pipeline
 
@@ -203,7 +207,8 @@ The stratified cap keeps all 8,631 identities while cutting wall-clock time ~4×
 | AgeDB-30 | Balanced pairs with age gap ≤ 30 yr, filename-parsed identity | AUC, TAR@FAR=1% |
 | Internal — Cancelability | 500 same-key and cross-key pairs from the validation set | Cross-key AUC ≈ 0.5 (unlinkability) |
 | Internal — Non-invertibility | Pseudo-inverse attack on a validation batch | Recovery similarity < 0.30 |
-| Pre-training sanity check | Synthetic residues, no generator/GPU/dataset needed — `python -m eval.sanity_transform_test` | Confirms `CancelableTransform` math is sound *before* spending GPU hours |
+| Pre-training sanity check — transform | Synthetic residues, no generator/GPU/dataset needed — `python -m eval.sanity_transform_test` | Confirms `CancelableTransform` math is sound *before* spending GPU hours |
+| Pre-training sanity check — Stage 2 loop | Synthetic templates, no generator/GPU/dataset needed — `python -m eval.sanity_stage2_test` | Confirms the Stage 2 training loop learns on real multi-class data and rejects degenerate single-class datasets |
 
 ## Key Design Decisions
 

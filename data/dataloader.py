@@ -103,6 +103,24 @@ def build_dataloaders(
     remap = {old: new for new, old in enumerate(valid_lbls)}
     num_classes = len(valid_lbls)
 
+    if num_classes < 2:
+        # A classifier needs >= 2 classes to mean anything. With exactly 1
+        # class, CrossEntropyLoss is mathematically 0.0 and argmax accuracy
+        # is mathematically 100% for every sample, always -- regardless of
+        # model weights or training. That looks like a perfect classifier
+        # and is actually a silently broken dataset. This almost always
+        # means `image_dir` points at the wrong directory (e.g. a wrapper
+        # folder instead of the folder containing per-identity subfolders) --
+        # check what _find_image_root() resolved before retrying.
+        raise ValueError(
+            f"build_dataloaders found only {num_classes} identity/identities "
+            f"(after requiring >= {min_images_per_identity} images each) under "
+            f"image_dir={image_dir!r}. Refusing to build a degenerate "
+            f"single-class dataset -- inspect image_dir's contents; it likely "
+            f"points at a wrapper directory rather than the folder containing "
+            f"per-identity subfolders."
+        )
+
     # Stratified cap: keep at most imgs_per_identity per identity.
     # Using a seeded generator so subsets are reproducible across runs.
     rng = torch.Generator().manual_seed(seed)

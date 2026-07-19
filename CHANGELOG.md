@@ -124,3 +124,50 @@ synthetic pure-noise residues standing in for a converged generator's output,
 `eval/cancelability.py` was audited for the same pattern and does **not** have this
 bug — it compares templates directly, with no reconstruction step, which is the
 correct convention for measuring unlinkability.
+
+### Bug 7 — `_find_image_root()` silently picked the wrong dataset directory
+
+Downstream of Bug 6, but a distinct code bug: `_find_image_root()` only recognized
+identity folders whose names start with `"n"` (classic VGGFace2 convention, e.g.
+`n000002`). The `yakhyokhuja/vggface2-112x112` Kaggle repackaging nests the real
+identity folders one level deeper under a `vggface2_112x112/` wrapper directory
+with different naming, so the `"n"`-prefix check never matched anything in the
+whole tree and silently fell back to the wrong (too-shallow) root.
+`ImageFolder` then saw that one wrapper folder as a single class, and the
+`imgs_per_identity=100` stratified cap collapsed it to 100 images total —
+producing `batches/epoch: 2` and `num_classes: 1` instead of an error.
+
+That, in turn, produced a Stage 2 checkpoint with `losses = [0.0]*8` and
+`val_accs = [100.0]*8` from epoch 1, never changing. This is not a training-loop
+bug — it's the deterministic mathematical signature of `num_classes == 1`:
+softmax over a single logit is always exactly `1.0` regardless of its value, so
+`CrossEntropyLoss = -log(1.0) = 0.0` exactly (and its gradient is exactly zero
+too), and `argmax` of a one-output head always matches the one label that can
+exist. `eval/sanity_stage2_test.py` reproduces this signature on synthetic data
+to document it, confirms `build_dataloaders()`'s new guard below rejects it, and
+separately confirms the same training-loop shape (`build_mlp` → `CrossEntropyLoss`
+→ `Adam`) behaves normally (loss falls, accuracy rises gradually) on genuine
+multi-class synthetic data.
+
+```python
+# BEFORE (wrong) — only matches VGGFace2's classic "n000002" naming
+def _find_image_root(base_path: str) -> str:
+    for root, dirs, _files in os.walk(base_path):
+        id_dirs = [d for d in dirs if d.startswith("n")]
+        if len(id_dirs) > 10:
+            return root
+    return base_path
+
+# AFTER (correct) — naming-convention-agnostic: pick the directory with the
+# most immediate subdirectories, wherever it is in the tree
+def _find_image_root(base_path: str) -> str:
+    best_root, best_count = base_path, 0
+    for root, dirs, _files in os.walk(base_path):
+        if len(dirs) > best_count:
+            best_root, best_count = root, len(dirs)
+    return best_root
+```
+
+Also added a guard in `build_dataloaders()`: it now raises `ValueError` if
+`num_classes < 2`, instead of silently building a degenerate one-class dataset
+that trains "successfully" to a meaningless 0.0 loss / 100% accuracy.
